@@ -22,6 +22,21 @@ st.set_page_config(
     layout="wide"
 )
 
+# 设置中文字体支持
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Noto Sans SC', 'Microsoft YaHei', 'SimHei', sans-serif;
+    }
+
+    .stDataFrame {
+        font-family: 'Noto Sans SC', 'Microsoft YaHei', 'SimHei', sans-serif;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # =============================================================================
 # 数据结构定义
 # =============================================================================
