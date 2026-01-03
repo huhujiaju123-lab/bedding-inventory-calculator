@@ -230,9 +230,14 @@ def aggregate_component_inventory(df_inventory: pd.DataFrame) -> Dict:
         color = spec.color
         size = spec.size
 
+        # 枕套处理：一对=1套，单只需要2只=1套
         if comp_type == '枕套':
-            multiplier = parse_pillow_quantity(name)
-            stock = stock * multiplier
+            if '一对' in name:
+                # 一对装：库存数就是可组装套数
+                stock = stock
+            else:
+                # 单只：2只=1套，向下取整
+                stock = stock // 2
 
         if color not in inventory[comp_type]:
             inventory[comp_type][color] = {}
@@ -306,17 +311,28 @@ def calculate_sku_inventory(
 
         color_base = color
 
+        # 获取该颜色的枕套总库存（套数）
+        pillow_total = 0
+        if color_base in component_inventory.get('枕套', {}):
+            pillow_total = component_inventory['枕套'][color_base].get('标准', 0)
+
+        # 第一轮：计算每个SKU基于被套和床单/笠的理论可组装数
+        sku_theoretical = []
         for demand in sku_demands:
             bom = demand['bom']
             ratio = demand['ratio']
 
             if ratio == 0:
-                results.append({
-                    'SKU_ID': demand['sku_id'],
-                    '套件描述': demand['sku_desc'],
-                    '颜色': color,
-                    '可售库存': 0,
-                    '计算明细': '比例为0'
+                sku_theoretical.append({
+                    'demand': demand,
+                    'allocated_duvet': 0,
+                    'allocated_sheet': 0,
+                    'theoretical': 0,
+                    'duvet_stock': 0,
+                    'sheet_stock': 0,
+                    'duvet_pool_ratio': 0,
+                    'sheet_pool_ratio': 0,
+                    'is_zero_ratio': True
                 })
                 continue
 
@@ -338,21 +354,65 @@ def calculate_sku_inventory(
                 sheet_stock = component_inventory[sheet_type][color_base].get(sheet_size, 0)
             allocated_sheet = sheet_stock * (ratio / sheet_pool_ratio) if sheet_pool_ratio > 0 else 0
 
-            # 枕套分配
-            pillow_stock = 0
-            if color_base in component_inventory.get('枕套', {}):
-                pillow_stock = component_inventory['枕套'][color_base].get('标准', 0)
-            allocated_pillow = pillow_stock * (ratio / total_ratio) if total_ratio > 0 else 0
-            pillow_sets = allocated_pillow / bom.pillow_count
+            # 被套和床单/笠的短板（不含枕套）
+            theoretical = min(allocated_duvet, allocated_sheet)
 
-            # 木桶短板
-            theoretical_sets = min(allocated_duvet, allocated_sheet, pillow_sets)
-            final_stock = int(theoretical_sets * safety_factor)
+            sku_theoretical.append({
+                'demand': demand,
+                'allocated_duvet': allocated_duvet,
+                'allocated_sheet': allocated_sheet,
+                'theoretical': theoretical,
+                'duvet_stock': duvet_stock,
+                'sheet_stock': sheet_stock,
+                'duvet_pool_ratio': duvet_pool_ratio,
+                'sheet_pool_ratio': sheet_pool_ratio,
+                'is_zero_ratio': False
+            })
 
-            detail = (f"被套{duvet_key}:{duvet_stock}*{ratio:.4f}/{duvet_pool_ratio:.4f}={allocated_duvet:.1f}, "
-                     f"{sheet_type}{sheet_size}:{sheet_stock}*{ratio:.4f}/{sheet_pool_ratio:.4f}={allocated_sheet:.1f}, "
-                     f"枕套:{pillow_stock}*{ratio:.4f}/{total_ratio:.4f}={allocated_pillow:.1f}只/{bom.pillow_count}={pillow_sets:.1f}套, "
-                     f"短板:{theoretical_sets:.1f}*{safety_factor}={final_stock}")
+        # 第二轮：检查枕套是否足够，如果不够则按比例缩减
+        total_theoretical = sum(s['theoretical'] for s in sku_theoretical)
+        pillow_sufficient = pillow_total >= total_theoretical
+        pillow_ratio = pillow_total / total_theoretical if total_theoretical > 0 else 1
+
+        # 生成最终结果
+        for sku_data in sku_theoretical:
+            demand = sku_data['demand']
+            bom = demand['bom']
+
+            if sku_data['is_zero_ratio']:
+                results.append({
+                    'SKU_ID': demand['sku_id'],
+                    '套件描述': demand['sku_desc'],
+                    '颜色': color,
+                    '可售库存': 0,
+                    '计算明细': '比例为0'
+                })
+                continue
+
+            theoretical = sku_data['theoretical']
+            allocated_duvet = sku_data['allocated_duvet']
+            allocated_sheet = sku_data['allocated_sheet']
+
+            # 如果枕套不足，按比例缩减
+            if not pillow_sufficient:
+                theoretical = theoretical * pillow_ratio
+
+            final_stock = int(theoretical * safety_factor)
+
+            sheet_type = bom.sheet_type
+            sheet_size = bom.sheet_size
+            duvet_key = bom.duvet_size
+
+            if pillow_sufficient:
+                detail = (f"被套{duvet_key}:{sku_data['duvet_stock']}*{demand['ratio']:.4f}/{sku_data['duvet_pool_ratio']:.4f}={allocated_duvet:.1f}, "
+                         f"{sheet_type}{sheet_size}:{sku_data['sheet_stock']}*{demand['ratio']:.4f}/{sku_data['sheet_pool_ratio']:.4f}={allocated_sheet:.1f}, "
+                         f"枕套充足({pillow_total}套), "
+                         f"短板:{theoretical:.1f}*{safety_factor}={final_stock}")
+            else:
+                detail = (f"被套{duvet_key}:{sku_data['duvet_stock']}*{demand['ratio']:.4f}/{sku_data['duvet_pool_ratio']:.4f}={allocated_duvet:.1f}, "
+                         f"{sheet_type}{sheet_size}:{sku_data['sheet_stock']}*{demand['ratio']:.4f}/{sku_data['sheet_pool_ratio']:.4f}={allocated_sheet:.1f}, "
+                         f"枕套不足({pillow_total}套<{total_theoretical:.0f}套需求,缩减{pillow_ratio:.2%}), "
+                         f"短板:{theoretical:.1f}*{safety_factor}={final_stock}")
 
             results.append({
                 'SKU_ID': demand['sku_id'],
